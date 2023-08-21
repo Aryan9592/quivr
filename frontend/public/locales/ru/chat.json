@@ -1,5 +1,5 @@
 {
-    "actions_bar_placeholder": "Задайте вопрос @brains или /files и выберите ваш #prompt",
+    "actions_bar_placeholder": "Задайте вопрос @brains",
     "ask": "Задайте вопрос или опишите задачу.",
     "begin_conversation_placeholder": "Начните беседу здесь...",
     "brain": "мозг",
@@ -33,5 +33,6 @@
     "subtitle": "Общайтесь с языковой моделью о ваших загруженных данных",
     "thinking": "Думаю...",
     "title": "Чат с {{brain}}",
-    "missing_brain": "Мозг не найден"
+    "missing_brain": "Мозг не найден",
+    "new_brain": "Создать новый мозг"
 }
