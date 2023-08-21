@@ -1,31 +1,30 @@
 import asyncio
 import json
+from typing import AsyncIterable, Awaitable, List, Optional
 from uuid import UUID
 
 from langchain.callbacks.streaming_aiter import AsyncIteratorCallbackHandler
-from langchain.chat_models import ChatOpenAI
 from langchain.chains import LLMChain
+from langchain.chat_models import ChatOpenAI
 from langchain.llms.base import BaseLLM
 from langchain.prompts.chat import (
     ChatPromptTemplate,
     HumanMessagePromptTemplate,
 )
+from logger import get_logger
+from models.chats import ChatQuestion
 from models.databases.supabase.chats import CreateChatHistory
+from pydantic import BaseModel
 from repository.chat import (
-    update_message_by_id,
+    GetChatHistoryOutput,
     format_chat_history,
+    format_history_to_openai_mesages,
     get_chat_history,
     update_chat_history,
-    format_history_to_openai_mesages,
-    GetChatHistoryOutput,
+    update_message_by_id,
 )
-from logger import get_logger
-from models import ChatQuestion
 
-
-from pydantic import BaseModel
-
-from typing import AsyncIterable, Awaitable, List
+from llm.utils.get_prompt_to_use import get_prompt_to_use
 
 logger = get_logger(__name__)
 SYSTEM_MESSAGE = "Your name is Quivr. You're a helpful assistant.  If you don't know the answer, just say that you don't know, don't try to make up an answer."
@@ -40,6 +39,7 @@ class HeadlessQA(BaseModel):
     streaming: bool = False
     chat_id: str = None  # type: ignore
     callbacks: List[AsyncIteratorCallbackHandler] = None  # type: ignore
+    prompt_id: Optional[UUID]
 
     def _determine_api_key(self, openai_api_key, user_openai_api_key):
         """If user provided an API key, use it."""
@@ -104,11 +104,19 @@ class HeadlessQA(BaseModel):
         self, chat_id: UUID, question: ChatQuestion
     ) -> GetChatHistoryOutput:
         transformed_history = format_chat_history(get_chat_history(self.chat_id))
-        messages = format_history_to_openai_mesages(transformed_history, SYSTEM_MESSAGE, question.question)
+        prompt_to_use = get_prompt_to_use(None, self.prompt_id)
+
+        messages = format_history_to_openai_mesages(
+            transformed_history,
+            prompt_to_use.content if prompt_to_use else SYSTEM_MESSAGE,
+            question.question,
+        )
         answering_llm = self._create_llm(
             model=self.model, streaming=False, callbacks=self.callbacks
         )
-        model_prediction = answering_llm.predict_messages(messages)  # pyright: ignore reportPrivateUsage=none
+        model_prediction = answering_llm.predict_messages(
+            messages
+        )  # pyright: ignore reportPrivateUsage=none
         answer = model_prediction.content
 
         new_chat = update_chat_history(
@@ -118,10 +126,11 @@ class HeadlessQA(BaseModel):
                     "user_message": question.question,
                     "assistant": answer,
                     "brain_id": None,
-                    "prompt_id": None,
+                    "prompt_id": self.prompt_id,
                 }
             )
         )
+        prompt = get_prompt_to_use(None, self.prompt_id)
 
         return GetChatHistoryOutput(
             **{
@@ -129,7 +138,7 @@ class HeadlessQA(BaseModel):
                 "user_message": question.question,
                 "assistant": answer,
                 "message_time": new_chat.message_time,
-                "prompt_title": None,
+                "prompt_title": prompt.title if prompt else None,
                 "brain_name": None,
                 "message_id": new_chat.message_id,
             }
@@ -142,7 +151,13 @@ class HeadlessQA(BaseModel):
         self.callbacks = [callback]
 
         transformed_history = format_chat_history(get_chat_history(self.chat_id))
-        messages = format_history_to_openai_mesages(transformed_history, SYSTEM_MESSAGE, question.question)
+        prompt_to_use = get_prompt_to_use(None, self.prompt_id)
+
+        messages = format_history_to_openai_mesages(
+            transformed_history,
+            prompt_to_use.content if prompt_to_use else SYSTEM_MESSAGE,
+            question.question,
+        )
         answering_llm = self._create_llm(
             model=self.model, streaming=True, callbacks=self.callbacks
         )
@@ -159,6 +174,7 @@ class HeadlessQA(BaseModel):
                 logger.error(f"Caught exception: {e}")
             finally:
                 event.set()
+
         run = asyncio.create_task(
             wrap_done(
                 headlessChain.acall({}),
@@ -173,10 +189,12 @@ class HeadlessQA(BaseModel):
                     "user_message": question.question,
                     "assistant": "",
                     "brain_id": None,
-                    "prompt_id": None,
+                    "prompt_id": self.prompt_id,
                 }
             )
         )
+
+        prompt = get_prompt_to_use(None, self.prompt_id)
 
         streamed_chat_history = GetChatHistoryOutput(
             **{
@@ -185,7 +203,7 @@ class HeadlessQA(BaseModel):
                 "message_time": streamed_chat_history.message_time,
                 "user_message": question.question,
                 "assistant": "",
-                "prompt_title": None,
+                "prompt_title": prompt.title if prompt else None,
                 "brain_name": None,
             }
         )

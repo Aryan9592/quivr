@@ -2,9 +2,7 @@ import asyncio
 import json
 from typing import AsyncIterable, Awaitable, Optional
 from uuid import UUID
-from logger import get_logger
 
-from supabase.client import Client, create_client
 from langchain.callbacks.streaming_aiter import AsyncIteratorCallbackHandler
 from langchain.chains import ConversationalRetrievalChain, LLMChain
 from langchain.chains.question_answering import load_qa_chain
@@ -15,26 +13,30 @@ from langchain.prompts.chat import (
     HumanMessagePromptTemplate,
     SystemMessagePromptTemplate,
 )
-
 from logger import get_logger
-from models import ChatQuestion
+from models.chats import ChatQuestion
 from models.databases.supabase.chats import CreateChatHistory
-from repository.brain import get_brain_by_id, get_brain_prompt_id
+from repository.brain import get_brain_by_id
 from repository.chat import (
+    GetChatHistoryOutput,
+    format_chat_history,
     get_chat_history,
     update_chat_history,
-    format_chat_history,
-    GetChatHistoryOutput,
     update_message_by_id,
 )
 from repository.prompt import get_prompt_by_id
 from supabase.client import Client, create_client
 from vectorstore.supabase import CustomSupabaseVectorStore
 
+from llm.utils.get_prompt_to_use import get_prompt_to_use
+from llm.utils.get_prompt_to_use_id import get_prompt_to_use_id
+
 from .base import BaseBrainPicking
 from .prompts.CONDENSE_PROMPT import CONDENSE_QUESTION_PROMPT
 
 logger = get_logger(__name__)
+
+quivr_default_prompt = "Your name is Quivr. You're a helpful assistant.  If you don't know the answer, just say that you don't know, don't try to make up an answer."
 
 
 class QABaseBrainPicking(BaseBrainPicking):
@@ -50,12 +52,14 @@ class QABaseBrainPicking(BaseBrainPicking):
     supabase_client: Optional[Client] = None
     vector_store: Optional[CustomSupabaseVectorStore] = None
     qa: Optional[ConversationalRetrievalChain] = None
+    prompt_id: Optional[UUID] = None
 
     def __init__(
         self,
         model: str,
         brain_id: str,
         chat_id: str,
+        prompt_id: UUID,
         streaming: bool = False,
         **kwargs,
     ):
@@ -68,6 +72,7 @@ class QABaseBrainPicking(BaseBrainPicking):
         )
         self.supabase_client = self._create_supabase_client()
         self.vector_store = self._create_vector_store()
+        self.prompt_id = prompt_id
 
     def _create_supabase_client(self) -> Client:
         return create_client(
@@ -107,11 +112,13 @@ class QABaseBrainPicking(BaseBrainPicking):
         
         {context}"""
 
+        prompt_to_use = get_prompt_to_use(UUID(self.brain_id), self.prompt_id)
+
         full_template = (
             "Here are you instructions to answer that you MUST ALWAYS Follow: "
-            + self.get_prompt()
-            + ". "
-            + system_template
+            + prompt_to_use.content
+            if prompt_to_use
+            else quivr_default_prompt + ". " + system_template
         )
         messages = [
             SystemMessagePromptTemplate.from_template(full_template),
@@ -143,19 +150,22 @@ class QABaseBrainPicking(BaseBrainPicking):
             verbose=False,
         )
 
+        prompt_content = get_prompt_to_use(UUID(self.brain_id), self.prompt_id)
+
         model_response = qa(
             {
                 "question": question.question,
                 "chat_history": transformed_history,
-                "custom_personality": self.get_prompt(),
+                "custom_personality": prompt_content.content
+                if prompt_content
+                else quivr_default_prompt,
             }
         )
 
         answer = model_response["answer"]
 
-        prompt_id = (
-            get_brain_prompt_id(question.brain_id) if question.brain_id else None
-        )
+        prompt_id = get_prompt_to_use_id(UUID(self.brain_id), self.prompt_id)
+
         new_chat = update_chat_history(
             CreateChatHistory(
                 **{
@@ -169,14 +179,9 @@ class QABaseBrainPicking(BaseBrainPicking):
         )
 
         brain = None
-        prompt = None
-        prompt_id = None
 
         if question.brain_id:
             brain = get_brain_by_id(question.brain_id)
-            if brain and brain.prompt_id:
-                prompt = get_prompt_by_id(brain.prompt_id)
-                prompt_id = prompt.id if prompt else None
 
         return GetChatHistoryOutput(
             **{
@@ -184,7 +189,7 @@ class QABaseBrainPicking(BaseBrainPicking):
                 "user_message": question.question,
                 "assistant": answer,
                 "message_time": new_chat.message_time,
-                "prompt_title": prompt.title if prompt else None,
+                "prompt_title": prompt_content.title if prompt_content else None,
                 "brain_name": brain.name if brain else None,
                 "message_id": new_chat.message_id,
             }
@@ -228,13 +233,17 @@ class QABaseBrainPicking(BaseBrainPicking):
             finally:
                 event.set()
 
+        prompt_to_use = get_prompt_to_use(UUID(self.brain_id), self.prompt_id)
+
         run = asyncio.create_task(
             wrap_done(
                 qa.acall(
                     {
                         "question": question.question,
                         "chat_history": transformed_history,
-                        "custom_personality": self.get_prompt(),
+                        "custom_personality": prompt_to_use.content
+                        if prompt_to_use
+                        else quivr_default_prompt,
                     }
                 ),
                 callback.done,
@@ -289,14 +298,3 @@ class QABaseBrainPicking(BaseBrainPicking):
             user_message=question.question,
             assistant=assistant,
         )
-
-    def get_prompt(self) -> str:
-        brain = get_brain_by_id(UUID(self.brain_id))
-        brain_prompt = "Your name is Quivr. You're a helpful assistant.  If you don't know the answer, just say that you don't know, don't try to make up an answer."
-
-        if brain and brain.prompt_id:
-            brain_prompt_object = get_prompt_by_id(brain.prompt_id)
-            if brain_prompt_object:
-                brain_prompt = brain_prompt_object.content
-
-        return brain_prompt
